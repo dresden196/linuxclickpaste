@@ -7,10 +7,28 @@ Matches the original functionality including hotkeys, cursor changes, and typing
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
-gi.require_version('AppIndicator3', '0.1')
-gi.require_version('Keybinder', '3.0')
 
-from gi.repository import Gtk, Gdk, GLib, AppIndicator3, Keybinder
+# AppIndicator3 requires GTK 3, so we need to handle this carefully
+try:
+    # Try to import AppIndicator3 (requires GTK 3)
+    import gi as gi3
+    gi3.require_version('AppIndicator3', '0.1')
+    from gi.repository import AppIndicator3
+    APPINDICATOR_AVAILABLE = True
+except:
+    APPINDICATOR_AVAILABLE = False
+    AppIndicator3 = None
+
+# Keybinder also might have issues on Wayland
+try:
+    gi.require_version('Keybinder', '3.0')
+    from gi.repository import Keybinder
+    KEYBINDER_AVAILABLE = True
+except:
+    KEYBINDER_AVAILABLE = False
+    Keybinder = None
+
+from gi.repository import Gtk, Gdk, GLib
 import subprocess
 import time
 import threading
