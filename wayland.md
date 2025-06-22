@@ -1,6 +1,6 @@
 # Wayland Support for LinuxClickPaste
 
-## Current Statu
+## Current Status
 LinuxClickPaste has good Wayland support:
 
 ✅ **XWayland**: Most applications run through XWayland, so LinuxClickPaste works normally  
