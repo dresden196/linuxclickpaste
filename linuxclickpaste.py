@@ -42,8 +42,8 @@ logger = logging.getLogger('LinuxClickPaste')
 class TypeMethod(Enum):
     """Typing methods available"""
     XTEST = "xtest"          # Direct X11 key simulation (like SendKeys)
-    XDOTOOL = "xdotool"      # External tool (like AutoIt)
-    YDOTOOL = "ydotool"      # Wayland-compatible tool
+    XDOTOOL = "xdotool"      # External tool (works on X11 and XWayland)
+    YDOTOOL = "ydotool"      # Works on both X11 and Wayland
 
 class HotKeyMode(Enum):
     """Hotkey behavior modes"""
@@ -223,37 +223,43 @@ class XTestInputSimulator(InputSimulator):
             xtest.fake_input(self.display, X.KeyRelease, shift_keycode)
             self.display.sync()
 
-class XDoToolInputSimulator(InputSimulator):
-    """Input simulation using xdotool (like Windows AutoIt)"""
+class YDoToolInputSimulator(InputSimulator):
+    """Input simulation using ydotool (works on both X11 and Wayland)"""
     
     def __init__(self):
-        super().__init__()
+        # Check if ydotool is available and daemon is running
         try:
-            subprocess.run(['xdotool', '--version'], capture_output=True, check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            raise ImportError("xdotool is required for this input method")
+            result = subprocess.run(['ydotool', 'type', ''], capture_output=True, text=True)
+            if 'ydotoold backend unavailable' in result.stderr:
+                raise ImportError("ydotoold daemon not running. Start with: systemctl --user start ydotoold")
+        except FileNotFoundError:
+            raise ImportError("ydotool not installed")
     
     def prepare_keystrokes(self, text: str) -> List[str]:
-        """For xdotool, we can send the whole text at once"""
+        """For ydotool, we send the whole text"""
         return [text]
     
     def type_text(self, text: str, delay_ms: int) -> bool:
-        """Type text using xdotool with SendKeyDelay equivalent"""
+        """Type text using ydotool"""
         self.cancel_token.clear()
         
-        # xdotool type command with delay
-        proc = subprocess.Popen([
-            'xdotool', 'type', '--delay', str(delay_ms), text
-        ])
-        
-        # Wait for completion or cancellation
-        while proc.poll() is None:
-            if self.cancel_token.is_set():
-                proc.terminate()
-                return False
-            time.sleep(0.1)
-        
-        return proc.returncode == 0
+        try:
+            # ydotool type command with delay
+            proc = subprocess.Popen([
+                'ydotool', 'type', '--key-delay', str(delay_ms), text
+            ])
+            
+            # Wait for completion or cancellation
+            while proc.poll() is None:
+                if self.cancel_token.is_set():
+                    proc.terminate()
+                    return False
+                time.sleep(0.1)
+            
+            return proc.returncode == 0
+        except Exception as e:
+            logger.error(f"ydotool error: {e}")
+            return False
 
 class CursorManager:
     """Manages cursor changes like the Windows version"""
@@ -355,18 +361,31 @@ class ClickPasteApp:
     def _create_input_simulator(self):
         """Create appropriate input simulator"""
         try:
-            if self.settings.type_method == TypeMethod.XDOTOOL:
+            if self.settings.type_method == TypeMethod.YDOTOOL:
+                self.input_simulator = YDoToolInputSimulator()
+            elif self.settings.type_method == TypeMethod.XDOTOOL:
                 self.input_simulator = XDoToolInputSimulator()
             else:
                 self.input_simulator = XTestInputSimulator()
         except Exception as e:
-            logger.error(f"Failed to create input simulator: {e}")
-            # Try fallback
-            try:
-                self.input_simulator = XDoToolInputSimulator()
-                self.settings.type_method = TypeMethod.XDOTOOL
-            except:
-                raise RuntimeError("No input simulation method available")
+            logger.warning(f"Failed to create {self.settings.type_method.value} simulator: {e}")
+            # Try fallbacks
+            fallbacks = [TypeMethod.XDOTOOL, TypeMethod.YDOTOOL, TypeMethod.XTEST]
+            for method in fallbacks:
+                if method != self.settings.type_method:
+                    try:
+                        if method == TypeMethod.YDOTOOL:
+                            self.input_simulator = YDoToolInputSimulator()
+                        elif method == TypeMethod.XDOTOOL:
+                            self.input_simulator = XDoToolInputSimulator()
+                        else:
+                            self.input_simulator = XTestInputSimulator()
+                        logger.info(f"Fell back to {method.value}")
+                        self.settings.type_method = method
+                        return
+                    except:
+                        continue
+            raise RuntimeError("No input simulation method available")
     
     def create_indicator(self):
         """Create system tray indicator"""
@@ -523,7 +542,16 @@ class ClickPasteApp:
         self.method_combo = Gtk.ComboBoxText()
         self.method_combo.append_text("XTest (SendKeys equivalent)")
         self.method_combo.append_text("xdotool (AutoIt equivalent)")
-        self.method_combo.set_active(0 if self.settings.type_method == TypeMethod.XTEST else 1)
+        self.method_combo.append_text("ydotool (Wayland compatible)")
+        
+        # Set active based on current method
+        if self.settings.type_method == TypeMethod.XTEST:
+            self.method_combo.set_active(0)
+        elif self.settings.type_method == TypeMethod.XDOTOOL:
+            self.method_combo.set_active(1)
+        else:
+            self.method_combo.set_active(2)
+        
         self.method_combo.connect("changed", self.on_method_changed)
         method_box.append(self.method_combo)
         
@@ -634,7 +662,13 @@ class ClickPasteApp:
     
     def on_method_changed(self, combo):
         """Handle type method change"""
-        self.settings.type_method = TypeMethod.XTEST if combo.get_active() == 0 else TypeMethod.XDOTOOL
+        active = combo.get_active()
+        if active == 0:
+            self.settings.type_method = TypeMethod.XTEST
+        elif active == 1:
+            self.settings.type_method = TypeMethod.XDOTOOL
+        else:
+            self.settings.type_method = TypeMethod.YDOTOOL
         self._create_input_simulator()
     
     def on_confirm_toggled(self, check):
