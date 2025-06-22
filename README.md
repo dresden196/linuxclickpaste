@@ -126,7 +126,7 @@ cd linuxclickpaste
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/linuxclickpaste.git
+git clone https://github.com/dresden196/linuxclickpaste.git
 cd linuxclickpaste
 
 # Create virtual environment (optional)
