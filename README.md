@@ -1,168 +1,182 @@
-# LinuxClickPaste - Installation and Setup Guide
+# LinuxClickPaste
 
-## Overview
-LinuxClickPaste is a Linux equivalent of the Windows ClickPaste application. It allows you to paste clipboard contents as simulated keystrokes into applications that don't support regular paste functionality, such as VNC viewers, remote desktop tools, and virtual machines.
+A Linux equivalent of the Windows ClickPaste application - paste clipboard contents as keystrokes into applications that don't support regular paste operations.
 
-## Features
-- System tray integration
-- Click-to-paste functionality
-- Configurable keystroke delay for compatibility with laggy connections
-- Support for special characters and multi-line text
-- Minimal resource usage
-- GTK4-based interface
+Perfect for system administrators working with VNC sessions, iDRAC/iLO consoles, virtual machines, and other remote access tools where clipboard integration doesn't work.
 
-## Requirements
-- Linux with X11 (Wayland support coming soon)
+## 🎯 Features
+
+- **System Tray Integration** - Runs quietly in your system tray
+- **Click-to-Paste** - Click the tray icon, then click where you want to paste
+- **Global Hotkeys** - Configure keyboard shortcuts for quick access
+- **Multiple Input Methods**:
+  - XTest (native X11)
+  - xdotool (works with X11 and XWayland)
+  - ydotool (works with both X11 and Wayland)
+- **Smart Delays** - Configurable keystroke delays for laggy connections
+- **Safety Features** - Confirmation dialog for large pastes, ESC key cancellation
+- **Cross-Desktop** - Works with GNOME, KDE, XFCE, and other desktop environments
+
+## 📋 Requirements
+
+- Linux with X11 or Wayland (XWayland supported)
 - Python 3.8+
 - GTK 4.0
-- Python libraries: PyGObject, python-xlib
-- System tray support (most desktop environments)
+- System tray support
 
-## Installation
+## 🚀 Quick Start
 
-### 1. Install System Dependencies
+### Install Dependencies
 
 **Ubuntu/Debian:**
 ```bash
 sudo apt update
-sudo apt install python3-pip python3-gi python3-gi-cairo gir1.2-gtk-4.0 \
-                 gir1.2-appindicator3-0.1 libgirepository1.0-dev gcc \
-                 libcairo2-dev pkg-config python3-dev
+sudo apt install python3-pip python3-gi python3-gi-cairo \
+                 gir1.2-gtk-4.0 gir1.2-appindicator3-0.1 \
+                 gir1.2-keybinder-3.0 xdotool
+
+pip3 install --user PyGObject python-xlib
 ```
 
 **Fedora:**
 ```bash
 sudo dnf install python3-pip python3-gobject gtk4 \
-                 libappindicator-gtk3 python3-devel gcc \
-                 gobject-introspection-devel cairo-devel
+                 libappindicator-gtk3 keybinder3 xdotool
+
+pip3 install --user python-xlib
 ```
 
 **Arch Linux:**
 ```bash
 sudo pacman -S python-pip python-gobject gtk4 \
-               libappindicator-gtk3 python-cairo
+               libappindicator-gtk3 libkeybinder3 xdotool
+
+pip install python-xlib
 ```
 
-### 2. Install Python Dependencies
-```bash
-pip3 install --user python-xlib PyGObject
-```
+### Download and Run
 
-### 3. Download and Install LinuxClickPaste
-
-#### Option A: Direct Installation
 ```bash
-# Download the script
-wget https://raw.githubusercontent.com/yourusername/linuxclickpaste/main/linuxclickpaste.py
+# Clone the repository
+git clone https://github.com/dresden196/linuxclickpaste.git
+cd linuxclickpaste
+
+# Make executable
 chmod +x linuxclickpaste.py
 
-# Move to local bin directory
-mkdir -p ~/.local/bin
-mv linuxclickpaste.py ~/.local/bin/linuxclickpaste
+# Run
+./linuxclickpaste.py
+```
 
-# Create desktop entry for autostart
+## 💻 Usage
+
+1. **Copy text to clipboard** (Ctrl+C)
+2. **Click the tray icon** or use your configured hotkey
+3. **Click where you want to paste** - cursor changes to crosshair
+4. **Watch it type** - the text is typed as keystrokes
+
+### Settings
+
+Right-click the tray icon → Settings to configure:
+- **Hotkey**: Set a global keyboard shortcut
+- **Delays**: Adjust typing speed for your connection
+- **Type Method**: Choose between XTest, xdotool, or ydotool
+- **Confirmation**: Set threshold for paste confirmation dialog
+
+## 🖥️ Display Server Support
+
+| Display Server | Support Level | Notes |
+|----------------|---------------|-------|
+| **X11** | ✅ Full | All features work perfectly |
+| **XWayland** | ✅ Full | Most apps on Wayland use this |
+| **Wayland (Native)** | ✅ Good | Use ydotool for native Wayland apps |
+
+See [wayland.md](wayland.md) for detailed Wayland information.
+
+## 🔧 Wayland Setup (Optional)
+
+For native Wayland applications:
+
+```bash
+# Install ydotool
+sudo apt install ydotool  # or equivalent for your distro
+
+# Enable ydotool daemon
+systemctl --user enable --now ydotoold
+
+# In LinuxClickPaste settings, select "ydotool" as the type method
+```
+
+## 🎮 Use Cases
+
+- **VNC Sessions** - TigerVNC, RealVNC, TightVNC
+- **Server Consoles** - iDRAC, iLO, IPMI
+- **Virtual Machines** - VirtualBox, VMware, QEMU
+- **Remote Desktop** - When clipboard sync fails
+- **Web Consoles** - Cloud provider VNC consoles
+- **Any Application** - That doesn't accept normal paste
+
+## ⚙️ Advanced Configuration
+
+### Auto-start on Login
+
+```bash
+# Create desktop entry
 mkdir -p ~/.config/autostart
-cat > ~/.config/autostart/linuxclickpaste.desktop << EOF
+cp ~/.config/autostart/linuxclickpaste.desktop <<EOF
 [Desktop Entry]
 Type=Application
 Name=LinuxClickPaste
-Exec=$HOME/.local/bin/linuxclickpaste
+Exec=/path/to/linuxclickpaste.py
 Icon=edit-paste
 Comment=Paste clipboard as keystrokes
 X-GNOME-Autostart-enabled=true
 EOF
 ```
 
-#### Option B: Git Clone
-```bash
-git clone https://github.com/yourusername/linuxclickpaste.git
-cd linuxclickpaste
-./install.sh
-```
+### Custom Delays for Different Scenarios
 
-## Usage
+In Settings, you can configure delays:
+- **Local VMs**: 5-10ms
+- **LAN VNC**: 20-50ms  
+- **Remote VNC**: 50-100ms
+- **Very Slow**: 200ms+
 
-### Basic Usage
-1. **Start the application**: Run `linuxclickpaste` or click on it in your application menu
-2. **Copy text**: Copy any text to your clipboard (Ctrl+C)
-3. **Initiate paste**: Click the LinuxClickPaste icon in the system tray and select "Click to Paste"
-4. **Select target**: Your cursor will change to a crosshair. Click where you want to paste
-5. **Watch it type**: The application will simulate typing the clipboard contents
+## 🐛 Troubleshooting
 
-### Settings
-- **Keystroke Delay**: Adjust the delay between keystrokes (in milliseconds)
-  - Default: 10ms
-  - For laggy VNC connections: 50-100ms
-  - For very slow connections: 200ms+
+**"Already running" error**
+- LinuxClickPaste is already in your system tray
 
-### Tips for Best Results
-1. **VNC/Remote Desktop**: Increase keystroke delay if characters are being dropped
-2. **Special Characters**: The app handles most special characters, but some may require the target application to have the same keyboard layout
-3. **Large Text**: For very large amounts of text, consider breaking it into smaller chunks
-4. **Elevated Applications**: The app needs to run with the same privileges as the target application
+**No system tray icon**
+- Install AppIndicator support for your desktop
+- GNOME: `gnome-shell-extension-appindicator`
 
-## Troubleshooting
+**Hotkeys don't work on Wayland**
+- Use your desktop's keyboard shortcuts to launch LinuxClickPaste
+- See [wayland.md](wayland.md) for details
 
-### Application doesn't start
-- Check if all dependencies are installed: `python3 -c "import gi; gi.require_version('Gtk', '4.0')"`
-- Ensure you have X11 (not pure Wayland): `echo $XDG_SESSION_TYPE`
-
-### System tray icon not visible
-- Some desktop environments hide tray icons by default
-- GNOME: Install gnome-shell-extension-appindicator
-- KDE: Should work out of the box
-- XFCE: Check panel settings for "Status Tray Plugin"
-
-### Characters are dropped or garbled
+**Characters are dropped/garbled**
 - Increase the keystroke delay in settings
-- Ensure the target application has focus
-- Check that keyboard layouts match between host and target
+- Try a different input method (xdotool/ydotool)
 
-### Cannot paste into certain applications
-- Some applications may block simulated input
-- Try running LinuxClickPaste with elevated privileges if pasting into admin applications
+## 🤝 Contributing
 
-## Building from Source
+Contributions are welcome! Please feel free to submit pull requests or open issues.
 
-```bash
-# Clone repository
-git clone https://github.com/dresden196/linuxclickpaste.git
-cd linuxclickpaste
+## 📜 License
 
-# Create virtual environment (optional)
-python3 -m venv venv
-source venv/bin/activate
+GPL-3.0 License - see [LICENSE](LICENSE) file
 
-# Install dependencies
-pip install -r requirements.txt
+## 🙏 Acknowledgments
 
-# Run
-python3 linuxclickpaste.py
-```
+- Inspired by [ClickPaste for Windows](https://github.com/Collective-Software/ClickPaste)
+- Thanks to the GTK and Python communities
 
-## Contributing
-Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
+## 📞 Support
 
-## License
-GPL-3.0 License
+- **Issues**: [GitHub Issues](https://github.com/dresden196/linuxclickpaste/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/dresden196/linuxclickpaste/discussions)
 
-## Comparison with Windows ClickPaste
-| Feature | Windows ClickPaste | LinuxClickPaste |
-|---------|-------------------|-----------------|
-| System Tray | ✓ | ✓ |
-| Click to Paste | ✓ | ✓ |
-| Hotkey Support | ✓ | Coming Soon |
-| Settings UI | ✓ | ✓ |
-| Keystroke Delay | ✓ | ✓ |
-| Special Characters | ✓ | ✓ |
-| Multi-line Support | ✓ | ✓ |
-| Wayland Support | N/A | Coming Soon |
+---
 
-## Future Enhancements
-- [ ] Wayland support using libei
-- [ ] Global hotkey configuration
-- [ ] Paste history
-- [ ] Smart delay (auto-adjust based on success rate)
-- [ ] Multiple paste modes (line-by-line, word-by-word)
-- [ ] Encryption for sensitive clipboard content
-- [ ] Profile support for different applications
+**Note for System Administrators**: This tool was specifically created with you in mind. No more manually typing long passwords or configuration commands into console windows that don't support paste!
