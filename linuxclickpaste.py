@@ -1,5 +1,3 @@
-# Let's create a properly fixed version
-cat > linuxclickpaste_fixed.py << 'EOF'
 #!/usr/bin/env python3
 """
 LinuxClickPaste - Feature-complete Linux port of Windows ClickPaste
@@ -878,4 +876,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-EOF
