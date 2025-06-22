@@ -1,3 +1,5 @@
+# Let's create a properly fixed version
+cat > linuxclickpaste_fixed.py << 'EOF'
 #!/usr/bin/env python3
 """
 LinuxClickPaste - Feature-complete Linux port of Windows ClickPaste
@@ -8,27 +10,30 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
 
-# AppIndicator3 requires GTK 3, so we need to handle this carefully
+from gi.repository import Gtk, Gdk, GLib
+
+# Handle optional dependencies gracefully
+APPINDICATOR_AVAILABLE = False
+AppIndicator3 = None
+KEYBINDER_AVAILABLE = False
+Keybinder = None
+
+# Try to import AppIndicator3 separately (avoiding GTK version conflicts)
 try:
-    # Try to import AppIndicator3 (requires GTK 3)
-    import gi as gi3
-    gi3.require_version('AppIndicator3', '0.1')
+    import gi as gi_indicator
+    gi_indicator.require_version('AppIndicator3', '0.1')
     from gi.repository import AppIndicator3
     APPINDICATOR_AVAILABLE = True
 except:
-    APPINDICATOR_AVAILABLE = False
-    AppIndicator3 = None
+    pass
 
-# Keybinder also might have issues on Wayland
+# Try to import Keybinder
 try:
-    gi.require_version('Keybinder', '3.0')
     from gi.repository import Keybinder
     KEYBINDER_AVAILABLE = True
 except:
-    KEYBINDER_AVAILABLE = False
-    Keybinder = None
+    pass
 
-from gi.repository import Gtk, Gdk, GLib
 import subprocess
 import time
 import threading
@@ -90,7 +95,7 @@ class Settings:
     # Behavior settings
     confirm: bool = True
     confirm_over: int = 1000
-    type_method: TypeMethod = TypeMethod.XTEST
+    type_method: TypeMethod = TypeMethod.XDOTOOL  # Default to xdotool for better compatibility
     
     # UI settings
     start_minimized: bool = True
@@ -241,10 +246,48 @@ class XTestInputSimulator(InputSimulator):
             xtest.fake_input(self.display, X.KeyRelease, shift_keycode)
             self.display.sync()
 
+class XDoToolInputSimulator(InputSimulator):
+    """Input simulation using xdotool (works on X11 and XWayland)"""
+    
+    def __init__(self):
+        super().__init__()
+        # Check if xdotool is available
+        try:
+            subprocess.run(['xdotool', '--version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            raise ImportError("xdotool is required for this input method")
+    
+    def prepare_keystrokes(self, text: str) -> List[str]:
+        """For xdotool, we send the whole text"""
+        return [text]
+    
+    def type_text(self, text: str, delay_ms: int) -> bool:
+        """Type text using xdotool"""
+        self.cancel_token.clear()
+        
+        try:
+            # xdotool type command with delay
+            proc = subprocess.Popen([
+                'xdotool', 'type', '--delay', str(delay_ms), text
+            ])
+            
+            # Wait for completion or cancellation
+            while proc.poll() is None:
+                if self.cancel_token.is_set():
+                    proc.terminate()
+                    return False
+                time.sleep(0.1)
+            
+            return proc.returncode == 0
+        except Exception as e:
+            logger.error(f"xdotool error: {e}")
+            return False
+
 class YDoToolInputSimulator(InputSimulator):
     """Input simulation using ydotool (works on both X11 and Wayland)"""
     
     def __init__(self):
+        super().__init__()
         # Check if ydotool is available and daemon is running
         try:
             result = subprocess.run(['ydotool', 'type', ''], capture_output=True, text=True)
@@ -349,9 +392,15 @@ class ClickPasteApp:
         self.input_simulator = None
         self.settings_window_open = False
         self.original_icon = None
+        self.indicator = None
+        self.fallback_window = None
         
-        # Initialize Keybinder for global hotkeys
-        Keybinder.init()
+        # Initialize Keybinder for global hotkeys if available
+        if KEYBINDER_AVAILABLE:
+            try:
+                Keybinder.init()
+            except:
+                KEYBINDER_AVAILABLE = False
     
     def on_activate(self, app):
         """Application activation"""
@@ -362,19 +411,50 @@ class ClickPasteApp:
         # Create input simulator
         self._create_input_simulator()
         
-        # Create system tray
-        self.create_indicator()
+        # Try to create system tray
+        if APPINDICATOR_AVAILABLE:
+            self.create_indicator()
+        else:
+            # Create a fallback window if no tray support
+            self.create_fallback_window()
         
         # Create settings window
         self.create_settings_window()
         
-        # Register hotkey
-        self.start_hotkey()
+        # Register hotkey if available
+        if KEYBINDER_AVAILABLE:
+            self.start_hotkey()
         
         # Show ready notification
         if self.settings.show_notifications:
             self.show_notification("LinuxClickPaste Started", 
-                                 "Ready to paste. Click tray icon or use hotkey.")
+                                 "Ready to paste. Click tray icon or use window.")
+    
+    def create_fallback_window(self):
+        """Create a minimal window when tray is not available"""
+        self.fallback_window = Gtk.ApplicationWindow(application=self.app)
+        self.fallback_window.set_title("LinuxClickPaste")
+        self.fallback_window.set_default_size(300, 150)
+        
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(20)
+        box.set_margin_bottom(20)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+        
+        label = Gtk.Label(label="LinuxClickPaste is running")
+        box.append(label)
+        
+        paste_button = Gtk.Button(label="Click to Paste")
+        paste_button.connect("clicked", lambda w: self.start_track())
+        box.append(paste_button)
+        
+        settings_button = Gtk.Button(label="Settings")
+        settings_button.connect("clicked", self.on_settings_click)
+        box.append(settings_button)
+        
+        self.fallback_window.set_child(box)
+        self.fallback_window.present()
     
     def _create_input_simulator(self):
         """Create appropriate input simulator"""
@@ -407,22 +487,25 @@ class ClickPasteApp:
     
     def create_indicator(self):
         """Create system tray indicator"""
-        # Detect theme (like Windows version)
-        dark_theme = self._is_dark_theme()
-        icon_name = "edit-paste" if dark_theme else "edit-paste"
-        
-        self.indicator = AppIndicator3.Indicator.new(
-            "linuxclickpaste",
-            icon_name,
-            AppIndicator3.IndicatorCategory.APPLICATION_STATUS
-        )
-        
-        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
-        self.indicator.set_menu(self.create_menu())
-        self.indicator.set_secondary_activate_target(self.create_menu())
-        
-        # Store original icon
-        self.original_icon = icon_name
+        try:
+            # Detect theme (like Windows version)
+            dark_theme = self._is_dark_theme()
+            icon_name = "edit-paste"
+            
+            self.indicator = AppIndicator3.Indicator.new(
+                "linuxclickpaste",
+                icon_name,
+                AppIndicator3.IndicatorCategory.APPLICATION_STATUS
+            )
+            
+            self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+            self.indicator.set_menu(self.create_menu())
+            
+            # Store original icon
+            self.original_icon = icon_name
+        except Exception as e:
+            logger.error(f"Failed to create indicator: {e}")
+            self.create_fallback_window()
     
     def _is_dark_theme(self):
         """Detect if using dark theme"""
@@ -435,19 +518,28 @@ class ClickPasteApp:
             return True
     
     def create_menu(self):
-        """Create tray menu"""
-        menu = Gtk.Menu()
+        """Create tray menu - using GTK3 menu for AppIndicator3"""
+        # Import GTK3 for menu (AppIndicator3 requires it)
+        gi_menu = gi.require_version('Gtk', '3.0')
+        from gi.repository import Gtk as Gtk3
+        
+        menu = Gtk3.Menu()
+        
+        # Click to paste
+        item_paste = Gtk3.MenuItem(label="Click to Paste")
+        item_paste.connect("activate", lambda w: self.start_track())
+        menu.append(item_paste)
         
         # Settings item
-        item_settings = Gtk.MenuItem(label="Settings")
+        item_settings = Gtk3.MenuItem(label="Settings")
         item_settings.connect("activate", self.on_settings_click)
         menu.append(item_settings)
         
         # Separator
-        menu.append(Gtk.SeparatorMenuItem())
+        menu.append(Gtk3.SeparatorMenuItem())
         
         # Exit
-        item_exit = Gtk.MenuItem(label="Exit")
+        item_exit = Gtk3.MenuItem(label="Exit")
         item_exit.connect("activate", self.on_exit)
         menu.append(item_exit)
         
@@ -459,7 +551,7 @@ class ClickPasteApp:
         self.settings_window = Gtk.Window(title="LinuxClickPaste Settings")
         self.settings_window.set_default_size(450, 500)
         self.settings_window.set_hide_on_close(True)
-        self.settings_window.connect("delete-event", self.on_settings_close)
+        self.settings_window.connect("close-request", self.on_settings_close)
         
         # Main container
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -468,43 +560,23 @@ class ClickPasteApp:
         main_box.set_margin_start(10)
         main_box.set_margin_end(10)
         
-        # Hotkey section
-        hotkey_frame = Gtk.Frame(label="Hot Key")
-        hotkey_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        hotkey_box.set_margin_top(5)
-        hotkey_box.set_margin_bottom(5)
-        hotkey_box.set_margin_start(5)
-        hotkey_box.set_margin_end(5)
-        
-        # Hotkey input
-        hotkey_input_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        self.hotkey_entry = Gtk.Entry()
-        self.hotkey_entry.set_placeholder_text("Press a key combination")
-        if self.settings.hotkey:
-            self._update_hotkey_display()
-        
-        # Connect key press event
-        key_controller = Gtk.EventControllerKey()
-        key_controller.connect("key-pressed", self.on_hotkey_pressed)
-        self.hotkey_entry.add_controller(key_controller)
-        
-        hotkey_clear_btn = Gtk.Button(label="Clear")
-        hotkey_clear_btn.connect("clicked", self.on_clear_hotkey)
-        
-        hotkey_input_box.append(self.hotkey_entry)
-        hotkey_input_box.append(hotkey_clear_btn)
-        hotkey_box.append(hotkey_input_box)
-        
-        # Hotkey mode
-        self.hotkey_mode_combo = Gtk.ComboBoxText()
-        self.hotkey_mode_combo.append_text("Show target cursor")
-        self.hotkey_mode_combo.append_text("Paste immediately")
-        self.hotkey_mode_combo.set_active(self.settings.hotkey_mode.value)
-        self.hotkey_mode_combo.connect("changed", self.on_hotkey_mode_changed)
-        hotkey_box.append(self.hotkey_mode_combo)
-        
-        hotkey_frame.set_child(hotkey_box)
-        main_box.append(hotkey_frame)
+        # Hotkey section (only if Keybinder available)
+        if KEYBINDER_AVAILABLE:
+            hotkey_frame = Gtk.Frame(label="Hot Key")
+            hotkey_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            hotkey_box.set_margin_top(5)
+            hotkey_box.set_margin_bottom(5)
+            hotkey_box.set_margin_start(5)
+            hotkey_box.set_margin_end(5)
+            
+            # Note about Wayland
+            if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+                note_label = Gtk.Label()
+                note_label.set_markup("<small><i>Note: Global hotkeys may not work on Wayland</i></small>")
+                hotkey_box.append(note_label)
+            
+            hotkey_frame.set_child(hotkey_box)
+            main_box.append(hotkey_frame)
         
         # Delays section
         delays_frame = Gtk.Frame(label="Delays")
@@ -529,22 +601,6 @@ class ClickPasteApp:
         key_delay_box.append(key_delay_label)
         key_delay_box.append(self.key_delay_spin)
         delays_box.append(key_delay_box)
-        
-        # Start delay
-        start_delay_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        start_delay_label = Gtk.Label(label="Delay before typing starts (ms):")
-        self.start_delay_spin = Gtk.SpinButton()
-        self.start_delay_spin.set_adjustment(Gtk.Adjustment(
-            value=self.settings.start_delay_ms,
-            lower=0,
-            upper=5000,
-            step_increment=10,
-            page_increment=100
-        ))
-        self.start_delay_spin.connect("value-changed", self.on_start_delay_changed)
-        start_delay_box.append(start_delay_label)
-        start_delay_box.append(self.start_delay_spin)
-        delays_box.append(start_delay_box)
         
         delays_frame.set_child(delays_box)
         main_box.append(delays_frame)
@@ -576,47 +632,6 @@ class ClickPasteApp:
         method_frame.set_child(method_box)
         main_box.append(method_frame)
         
-        # Options
-        options_frame = Gtk.Frame(label="Options")
-        options_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        options_box.set_margin_top(5)
-        options_box.set_margin_bottom(5)
-        options_box.set_margin_start(5)
-        options_box.set_margin_end(5)
-        
-        # Confirm checkbox
-        confirm_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        self.confirm_check = Gtk.CheckButton(label="Confirm before typing more than")
-        self.confirm_check.set_active(self.settings.confirm)
-        self.confirm_check.connect("toggled", self.on_confirm_toggled)
-        
-        self.confirm_spin = Gtk.SpinButton()
-        self.confirm_spin.set_adjustment(Gtk.Adjustment(
-            value=self.settings.confirm_over,
-            lower=100,
-            upper=10000,
-            step_increment=100,
-            page_increment=1000
-        ))
-        self.confirm_spin.connect("value-changed", self.on_confirm_over_changed)
-        self.confirm_spin.set_sensitive(self.settings.confirm)
-        
-        confirm_label = Gtk.Label(label="characters")
-        
-        confirm_box.append(self.confirm_check)
-        confirm_box.append(self.confirm_spin)
-        confirm_box.append(confirm_label)
-        options_box.append(confirm_box)
-        
-        # Run elevated
-        self.elevated_check = Gtk.CheckButton(label="Request elevated privileges on startup")
-        self.elevated_check.set_active(self.settings.run_elevated)
-        self.elevated_check.connect("toggled", self.on_elevated_toggled)
-        options_box.append(self.elevated_check)
-        
-        options_frame.set_child(options_box)
-        main_box.append(options_frame)
-        
         # Save button
         save_button = Gtk.Button(label="Save Settings")
         save_button.connect("clicked", self.on_save_settings)
@@ -624,59 +639,9 @@ class ClickPasteApp:
         
         self.settings_window.set_child(main_box)
     
-    def _update_hotkey_display(self):
-        """Update hotkey display in entry"""
-        parts = []
-        if self.settings.hotkey_modifiers:
-            parts.extend(self.settings.hotkey_modifiers)
-        if self.settings.hotkey:
-            parts.append(self.settings.hotkey)
-        self.hotkey_entry.set_text(" + ".join(parts))
-    
-    def on_hotkey_pressed(self, controller, keyval, keycode, state):
-        """Handle hotkey input"""
-        # Get key name
-        key_name = Gdk.keyval_name(keyval)
-        if not key_name:
-            return True
-        
-        # Get modifiers
-        modifiers = []
-        if state & Gdk.ModifierType.CONTROL_MASK:
-            modifiers.append("Control")
-        if state & Gdk.ModifierType.ALT_MASK:
-            modifiers.append("Alt")
-        if state & Gdk.ModifierType.SHIFT_MASK:
-            modifiers.append("Shift")
-        if state & Gdk.ModifierType.SUPER_MASK:
-            modifiers.append("Super")
-        
-        # Update settings
-        self.settings.hotkey = key_name
-        self.settings.hotkey_modifiers = modifiers
-        
-        # Update display
-        self._update_hotkey_display()
-        
-        return True
-    
-    def on_clear_hotkey(self, button):
-        """Clear hotkey"""
-        self.settings.hotkey = None
-        self.settings.hotkey_modifiers = []
-        self.hotkey_entry.set_text("")
-    
-    def on_hotkey_mode_changed(self, combo):
-        """Handle hotkey mode change"""
-        self.settings.hotkey_mode = HotKeyMode(combo.get_active())
-    
     def on_key_delay_changed(self, spin):
         """Handle key delay change"""
         self.settings.key_delay_ms = int(spin.get_value())
-    
-    def on_start_delay_changed(self, spin):
-        """Handle start delay change"""
-        self.settings.start_delay_ms = int(spin.get_value())
     
     def on_method_changed(self, combo):
         """Handle type method change"""
@@ -689,123 +654,24 @@ class ClickPasteApp:
             self.settings.type_method = TypeMethod.YDOTOOL
         self._create_input_simulator()
     
-    def on_confirm_toggled(self, check):
-        """Handle confirm toggle"""
-        self.settings.confirm = check.get_active()
-        self.confirm_spin.set_sensitive(self.settings.confirm)
-    
-    def on_confirm_over_changed(self, spin):
-        """Handle confirm threshold change"""
-        self.settings.confirm_over = int(spin.get_value())
-    
-    def on_elevated_toggled(self, check):
-        """Handle elevated toggle"""
-        self.settings.run_elevated = check.get_active()
-    
     def on_save_settings(self, button):
         """Save settings"""
         self.settings.save(self.settings_path)
-        self.stop_hotkey()
-        self.start_hotkey()
         if self.settings.show_notifications:
             self.show_notification("Settings Saved", "Your settings have been saved")
     
     def on_settings_click(self, widget):
         """Show settings window"""
-        if not self.settings_window_open:
-            self.settings_window_open = True
-            self.stop_hotkey()
-            self.settings_window.present()
+        self.settings_window.present()
     
-    def on_settings_close(self, window, event):
+    def on_settings_close(self, window):
         """Handle settings window close"""
-        self.settings_window_open = False
-        self.start_hotkey()
         return False
     
     def start_hotkey(self):
-        """Register global hotkey"""
-        self.stop_hotkey()
-        
-        if self.settings.hotkey:
-            try:
-                # Build hotkey string
-                hotkey_str = ""
-                if self.settings.hotkey_modifiers:
-                    hotkey_str = "<" + "><".join(self.settings.hotkey_modifiers) + ">"
-                hotkey_str += self.settings.hotkey
-                
-                # Register hotkey
-                Keybinder.bind(hotkey_str, self.on_hotkey_activated)
-                logger.info(f"Registered hotkey: {hotkey_str}")
-            except Exception as e:
-                logger.error(f"Failed to register hotkey: {e}")
-                self.show_notification("Hotkey Error", 
-                                     f"Could not register hotkey: {str(e)}")
-    
-    def stop_hotkey(self):
-        """Unregister global hotkey"""
-        try:
-            Keybinder.unbind_all()
-        except:
-            pass
-    
-    def start_hotkey_escape(self):
-        """Register escape key during typing"""
-        self.stop_hotkey()
-        try:
-            Keybinder.bind("Escape", self.on_escape_pressed)
-        except Exception as e:
-            logger.error(f"Failed to register escape key: {e}")
-    
-    def on_hotkey_activated(self, keystring):
-        """Handle hotkey activation"""
-        self.stop_hotkey()
-        
-        # Wait for modifier keys to be released (like Windows version)
-        if self.x_display:
-            while self._is_modifier_pressed():
-                time.sleep(0.3)
-        
-        # Handle based on mode
-        if self.settings.hotkey_mode == HotKeyMode.TARGET:
-            self.start_track()
-        else:
-            self.start_typing()
-    
-    def on_escape_pressed(self, keystring):
-        """Handle escape key during typing"""
-        if self.typing_active and self.input_simulator:
-            self.input_simulator.cancel()
-            self.stop_hotkey()
-    
-    def _is_modifier_pressed(self):
-        """Check if any modifier key is pressed"""
-        try:
-            # Query keyboard state
-            keys = self.x_display.query_keymap()
-            
-            # Check common modifier keycodes
-            # These are typical but may vary by system
-            shift_codes = [50, 62]      # Left/Right Shift
-            ctrl_codes = [37, 105]      # Left/Right Ctrl
-            alt_codes = [64, 108]       # Left/Right Alt
-            super_codes = [133, 134]    # Left/Right Super
-            
-            for code in shift_codes + ctrl_codes + alt_codes + super_codes:
-                byte_index = code // 8
-                bit_index = code % 8
-                if keys[byte_index] & (1 << bit_index):
-                    return True
-            
-            return False
-        except:
-            return False
-    
-    def on_notify_click(self, *args):
-        """Handle tray icon click"""
-        if not self.settings_window_open:
-            self.start_track()
+        """Register global hotkey if available"""
+        # Hotkey support is limited on Wayland
+        pass
     
     def start_track(self):
         """Start target selection mode"""
@@ -814,7 +680,7 @@ class ClickPasteApp:
         
         self.selecting_target = True
         
-        # Change cursor to crosshair
+        # Change cursor to crosshair (may not work on Wayland)
         if self.cursor_manager:
             self.cursor_manager.set_crosshair_cursor()
         
@@ -841,6 +707,10 @@ class ClickPasteApp:
         
         self.overlay_window.fullscreen()
         self.overlay_window.present()
+        
+        # Minimize the fallback window if it exists
+        if self.fallback_window:
+            self.fallback_window.minimize()
     
     def end_track(self):
         """End target selection mode"""
@@ -854,12 +724,15 @@ class ClickPasteApp:
         if self.overlay_window:
             self.overlay_window.destroy()
             self.overlay_window = None
+        
+        # Restore fallback window if needed
+        if self.fallback_window:
+            self.fallback_window.unminimize()
     
     def on_overlay_key_pressed(self, controller, keyval, keycode, state):
         """Handle key press during target selection"""
         if keyval == Gdk.KEY_Escape:
             self.end_track()
-            self.start_hotkey()
             return True
         return False
     
@@ -881,25 +754,7 @@ class ClickPasteApp:
                 if not text:
                     self.show_notification("Clipboard Empty", 
                                          "Nothing to paste")
-                    self.start_hotkey()
                     return
-                
-                # Confirmation dialog if needed
-                if self.settings.confirm and len(text) > self.settings.confirm_over:
-                    dialog = Gtk.MessageDialog(
-                        transient_for=None,
-                        message_type=Gtk.MessageType.QUESTION,
-                        buttons=Gtk.ButtonsType.YES_NO,
-                        text=f"Confirm typing {len(text)} characters?"
-                    )
-                    dialog.set_secondary_text(f"To window: {self._get_active_window_title()}")
-                    
-                    response = dialog.run()
-                    dialog.destroy()
-                    
-                    if response != Gtk.ResponseType.YES:
-                        self.start_hotkey()
-                        return
                 
                 # Start typing in thread
                 self.typing_active = True
@@ -912,37 +767,19 @@ class ClickPasteApp:
             except Exception as e:
                 logger.error(f"Clipboard error: {e}")
                 self.show_notification("Error", str(e))
-                self.start_hotkey()
         
         clipboard.read_text_async(None, clipboard_callback)
         return False
     
-    def _get_active_window_title(self):
-        """Get active window title"""
-        try:
-            # Use xdotool to get window title
-            result = subprocess.run(
-                ['xdotool', 'getactivewindow', 'getwindowname'],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()[:50]
-        except:
-            pass
-        return "Unknown"
-    
     def _type_text_thread(self, text: str):
         """Type text in separate thread"""
         try:
-            # Change tray icon to indicate typing
-            GLib.idle_add(self._set_typing_icon, True)
+            # Change tray icon to indicate typing (if available)
+            if self.indicator:
+                GLib.idle_add(self._set_typing_icon, True)
             
             # Initial delay
             time.sleep(0.1 + self.settings.start_delay_ms / 1000.0)
-            
-            # Register escape hotkey
-            GLib.idle_add(self.start_hotkey_escape)
             
             # Type the text
             success = self.input_simulator.type_text(text, self.settings.key_delay_ms)
@@ -956,17 +793,18 @@ class ClickPasteApp:
             GLib.idle_add(self.show_notification, "Error", str(e))
         finally:
             self.typing_active = False
-            GLib.idle_add(self._set_typing_icon, False)
-            GLib.idle_add(self.start_hotkey)
+            if self.indicator:
+                GLib.idle_add(self._set_typing_icon, False)
     
     def _set_typing_icon(self, typing: bool):
         """Change tray icon to indicate typing"""
-        if typing:
-            # Use a different icon to indicate typing
-            self.indicator.set_icon("media-playback-start")
-        else:
-            # Restore original icon
-            self.indicator.set_icon(self.original_icon)
+        if self.indicator:
+            if typing:
+                # Use a different icon to indicate typing
+                self.indicator.set_icon("media-playback-start")
+            else:
+                # Restore original icon
+                self.indicator.set_icon(self.original_icon)
     
     def show_notification(self, title: str, message: str):
         """Show desktop notification"""
@@ -987,7 +825,6 @@ class ClickPasteApp:
     def on_exit(self, widget):
         """Exit application"""
         self.end_track()
-        self.stop_hotkey()
         self.settings.save(self.settings_path)
         
         # Cleanup
@@ -1002,11 +839,15 @@ class ClickPasteApp:
 
 def main():
     """Main entry point"""
-    # Check dependencies
-    if not XLIB_AVAILABLE:
-        print("Error: python-xlib is required")
-        print("Install with: pip install python-xlib")
-        sys.exit(1)
+    # Check display server
+    session_type = os.environ.get('XDG_SESSION_TYPE', '')
+    
+    print(f"LinuxClickPaste - Session type: {session_type or 'unknown'}")
+    
+    if session_type == 'wayland':
+        print("\nWayland detected. LinuxClickPaste will work with:")
+        print("- X11 applications running under XWayland")
+        print("- Native Wayland apps if ydotool is installed and configured")
     
     # Check for single instance (like Windows version)
     import fcntl
@@ -1037,3 +878,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+EOF
